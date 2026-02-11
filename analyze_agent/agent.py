@@ -1,11 +1,14 @@
 import os
 import json
 import logging
+import requests
 from typing import Dict, Any
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("NanoClaw")
+
+TRADING_BOT_URL = "http://trading-bot:8001/trade"
 
 class AnalyzeAgent:
     def __init__(self, model_name="claude-3-sonnet"):
@@ -30,8 +33,34 @@ class AnalyzeAgent:
         # 2. Reasoning (LLM Simulation for now, connection later)
         decision = self._reasoning_engine(signal_data, context)
         
-        # 3. Output
+        # 3. Execution Trigger (If Approved)
+        if decision['decision'] == "APPROVE":
+            self._trigger_execution(signal_data, decision)
+            
+        # 4. Output
         return decision
+
+    def _trigger_execution(self, signal_data, decision):
+        """
+        Sends the approved signal to the Trading Bot for execution.
+        """
+        logger.info(">>> Signal APPROVED. Triggering Trading Bot...")
+        payload = {
+            "symbol": signal_data['symbol'],
+            "side": signal_data['signal_type'], # BUY/SELL
+            "price": float(signal_data['price']),
+            "reason": decision['reasoning'],
+            "agent_decision": decision['decision']
+        }
+        
+        try:
+            response = requests.post(TRADING_BOT_URL, json=payload, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"Trading Bot Response: {response.json()}")
+            else:
+                logger.error(f"Trading Bot Error: {response.text}")
+        except Exception as e:
+            logger.error(f"Failed to reach Trading Bot: {e}")
 
     def _gather_context(self, symbol):
         """

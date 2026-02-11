@@ -24,6 +24,34 @@ services:
     container_name: analyze-agent
     ports:
       - "8000:8000"
+    environment:
+      - TRADING_BOT_URL=http://trading-bot:8001/trade
+    depends_on:
+      - trading-bot
+    restart: always
+
+  trading-bot:
+    build:
+      context: .
+      dockerfile: trading_bot/Dockerfile
+    container_name: trading-bot
+    ports:
+      - "8001:8001"
+    volumes:
+      - trades-db:/data
+    restart: always
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: dashboard
+    ports:
+      - "8501:8501"
+    volumes:
+      - trades-db:/data
+    depends_on:
+      - trading-bot
     restart: always
 
   influxdb:
@@ -43,3 +71,4 @@ services:
 
 volumes:
   influxdb-data:
+  trades-db:
