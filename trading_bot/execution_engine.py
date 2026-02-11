@@ -1,7 +1,6 @@
 import ccxt
 import time
 import logging
-from config import Config
 from db_manager import DBManager
 
 # Setup Logging

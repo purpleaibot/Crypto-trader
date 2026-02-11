@@ -1,7 +1,6 @@
 import time
 import logging
 import requests
-from config import Config
 from data_fetcher import DataFetcher
 from capital_manager import CapitalManager
 from strategy import Strategy
@@ -44,9 +43,9 @@ def main():
             # 2b. Fetch Data for Multiple Timeframes (Stub: fetch 1D, 4H, 1H)
             logger.info("Fetching Market Data...")
             
-            df_1d = fetcher.fetch_ohlcv(instance_config["symbol"], "1d", limit=200)
-            df_4h = fetcher.fetch_ohlcv(instance_config["symbol"], "4h", limit=200)
-            df_1h = fetcher.fetch_ohlcv(instance_config["symbol"], "1h", limit=50)
+            df_1d = fetcher.fetch_ohlcv(instance_config["symbol"], "1d", limit=300)
+            df_4h = fetcher.fetch_ohlcv(instance_config["symbol"], "4h", limit=300)
+            df_1h = fetcher.fetch_ohlcv(instance_config["symbol"], "1h", limit=100)
             
             if df_1d is not None and df_4h is not None and df_1h is not None:
                 # 2c. Calculate Indicators

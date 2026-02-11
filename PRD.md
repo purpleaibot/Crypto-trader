@@ -7,8 +7,11 @@ Crypto-Trader is an autonomous, three-part cryptocurrency trading system designe
 
 ### Part 1: Monitoring Bot (The "Eyes")
 *   **Role:** Market scanning, capital management, signal generation.
-*   **Data Source:** Exchange APIs (Binance, KuCoin, Gate.io). Fetch method: `Candle Close + 5s` (Polling) with "Smart API" (staggered) backup.
-*   **Storage:** InfluxDB (Time-series) for candle data.
+*   **Data Source:** Public Exchange APIs (Binance, KuCoin, Gate.io). Fetch method: `Candle Close + 5s` (Polling) with "Smart API" (staggered) backup.
+*   **Persistence:** 
+    *   **Local Storage:** Initial fetch of the last 500 CLOSED candles for each pair/timeframe stored in local SQLite (`candles.db`).
+    *   **Synchronization:** Every time a candle closes, the bot fetches the new closed candle and appends it to the local database.
+    *   **Validation:** Strict timestamp continuity check ("Option B") ensures candles are in correct chronological order with no gaps.
 *   **Strategy:** Multi-timeframe trend following (EMA, ADX) + Momentum triggers (RSI, EMA cross).
     *   **Filters:** Volatility (ATR) and Spread checks are mandatory.
     *   **Signal:** Only sends to Analyze Agent if "3 Correct Signals" (Higher TF Trend + Lower TF Trigger) match.

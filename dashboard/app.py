@@ -1,7 +1,6 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import time
 
 # Page Config
 st.set_page_config(page_title="Crypto-Trader Dashboard", layout="wide", page_icon="📈")
@@ -41,15 +40,15 @@ if menu == "Overview":
             else:
                 col1.metric("Total Equity", "N/A")
                 col2.metric("Current Level", "N/A")
-        except:
-            st.warning("No state data available yet.")
+        except Exception as e:
+            st.warning(f"No state data available yet. Error: {e}")
             
         st.markdown("### Recent Activity")
         try:
             trades_df = pd.read_sql("SELECT * FROM trades ORDER BY timestamp DESC LIMIT 10", conn)
             st.dataframe(trades_df)
-        except:
-            st.info("No trades recorded yet.")
+        except Exception as e:
+            st.info(f"No trades recorded yet. Error: {e}")
             
         conn.close()
 
