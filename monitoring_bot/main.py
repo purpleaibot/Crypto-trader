@@ -1,5 +1,6 @@
 import time
 import logging
+import requests
 from config import Config
 from data_fetcher import DataFetcher
 from capital_manager import CapitalManager
@@ -8,6 +9,8 @@ from strategy import Strategy
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MonitoringBot")
+
+ANALYZE_AGENT_URL = "http://analyze-agent:8000/analyze"
 
 def main():
     logger.info("Starting Monitoring Bot...")
@@ -39,12 +42,11 @@ def main():
                 break
                 
             # 2b. Fetch Data for Multiple Timeframes (Stub: fetch 1D, 4H, 1H)
-            # In production, fetch continuously. Here, fetching once per loop.
             logger.info("Fetching Market Data...")
             
-            df_1d = fetcher.fetch_ohlcv(instance_config["symbol"], "1d", limit=200) # Need enough for EMA 200
+            df_1d = fetcher.fetch_ohlcv(instance_config["symbol"], "1d", limit=200)
             df_4h = fetcher.fetch_ohlcv(instance_config["symbol"], "4h", limit=200)
-            df_1h = fetcher.fetch_ohlcv(instance_config["symbol"], "1h", limit=50) # Just for trigger
+            df_1h = fetcher.fetch_ohlcv(instance_config["symbol"], "1h", limit=50)
             
             if df_1d is not None and df_4h is not None and df_1h is not None:
                 # 2c. Calculate Indicators
@@ -63,7 +65,35 @@ def main():
                     if signal:
                         logger.info(f"SIGNAL DETECTED: {signal} {instance_config['symbol']}")
                         logger.info("Sending to Analyze Agent (NanoClaw)...")
-                        # TODO: Call NanoClaw API/Service
+                        
+                        # Call NanoClaw API
+                        payload = {
+                            "symbol": instance_config["symbol"],
+                            "timeframe": "1h",
+                            "signal_type": signal,
+                            "price": df_1h.iloc[-1]['close'],
+                            "indicators": {
+                                "rsi": df_1h.iloc[-1]['RSI'],
+                                "ema_10": df_1h.iloc[-1]['EMA_10'],
+                                "ema_20": df_1h.iloc[-1]['EMA_20']
+                            },
+                            "trend": trend_direction
+                        }
+                        
+                        try:
+                            response = requests.post(ANALYZE_AGENT_URL, json=payload, timeout=10)
+                            if response.status_code == 200:
+                                decision = response.json()
+                                logger.info(f"NanoClaw Decision: {decision}")
+                                if decision.get("decision") == "APPROVE":
+                                    logger.info(">>> TRADE APPROVED! Sending to Execution Engine (Next Step)...")
+                                else:
+                                    logger.info(">>> TRADE REJECTED by Agent.")
+                            else:
+                                logger.error(f"NanoClaw Error: {response.text}")
+                        except Exception as e:
+                            logger.error(f"Failed to reach Analyze Agent: {e}")
+                            
                     else:
                         logger.info("No trigger on 1H.")
                 else:

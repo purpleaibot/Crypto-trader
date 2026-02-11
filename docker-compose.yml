@@ -11,8 +11,19 @@ services:
       - INFLUXDB_TOKEN=my-token
       - INFLUXDB_ORG=my-org
       - INFLUXDB_BUCKET=crypto_trader
+      - ANALYZE_AGENT_URL=http://analyze-agent:8000/analyze
     depends_on:
       - influxdb
+      - analyze-agent
+    restart: always
+
+  analyze-agent:
+    build:
+      context: .
+      dockerfile: analyze_agent/Dockerfile
+    container_name: analyze-agent
+    ports:
+      - "8000:8000"
     restart: always
 
   influxdb:
