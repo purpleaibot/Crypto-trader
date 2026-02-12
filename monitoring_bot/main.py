@@ -9,7 +9,7 @@ from strategy import Strategy
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MonitoringBot")
 
-ANALYZE_AGENT_URL = "http://analyze-agent:8000/analyze"
+ANALYZE_AGENT_URL = "http://localhost:8000/analyze"
 
 def main():
     logger.info("Starting Monitoring Bot...")
