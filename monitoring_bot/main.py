@@ -26,7 +26,7 @@ class HiveEngine:
         logger.info("🐝 Hive Engine Initialized")
 
     def load_instances(self):
-        """Load ACTIVE instances from DB"""
+        """Load ACTIVE instances from DB and handle DELETED ones"""
         try:
             conn = sqlite3.connect(DB_PATH)
             # Ensure table exists
@@ -36,6 +36,26 @@ class HiveEngine:
                 status TEXT DEFAULT 'STOPPED', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
             
+            # 1. Handle DELETED instances first
+            deleted_df = pd.read_sql("SELECT * FROM instances WHERE status='DELETED'", conn)
+            for _, row in deleted_df.iterrows():
+                iid = row['id']
+                logger.info(f"🗑️ Cleaning up DELETED instance: {row['name']} ({iid})")
+                
+                # Unload from memory
+                if iid in self.active_instances:
+                    del self.active_instances[iid]
+                if iid in self.next_wake_times:
+                    del self.next_wake_times[iid]
+                
+                # Cleanup database data (candles)
+                self.cleanup_instance_data(row)
+                
+                # Permanently remove from instances table
+                conn.execute("DELETE FROM instances WHERE id=?", (iid,))
+                conn.commit()
+
+            # 2. Load ACTIVE instances
             df = pd.read_sql("SELECT * FROM instances WHERE status='ACTIVE'", conn)
             conn.close()
             
@@ -200,6 +220,26 @@ class HiveEngine:
                         logger.info(f"🚀 SIGNAL [{instance['name']}]: {signal} on {symbol} ({primary_tf})")
                         # TODO: Send to Analyze Agent with instance_id
                         # self.send_to_agent(instance['id'], symbol, signal, ...)
+
+    def cleanup_instance_data(self, row):
+        """Clean up candles associated with an instance's pairs"""
+        CANDLES_DB = "candles.db"
+        try:
+            conn = sqlite3.connect(CANDLES_DB)
+            pairs = json.loads(row['pairs']) if row['pairs'] else []
+            exchange = row['exchange']
+            
+            for pair_data in pairs:
+                symbol = pair_data['Symbol'] if isinstance(pair_data, dict) else pair_data
+                # Delete candles for this exchange/symbol combination
+                # Note: This is shared data. Deleting here affects other instances using same pair.
+                conn.execute("DELETE FROM candles WHERE exchange=? AND symbol=?", (exchange, symbol))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"🧼 Cleaned candles for {len(pairs)} pairs on {exchange}")
+        except Exception as e:
+            logger.error(f"Failed candle cleanup: {e}")
 
 if __name__ == "__main__":
     engine = HiveEngine()

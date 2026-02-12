@@ -455,8 +455,8 @@ elif st.session_state.page == "Live Monitor":
     conn = get_connection()
     if conn:
         try:
-            # Fetch Instances
-            df_instances = pd.read_sql("SELECT * FROM instances ORDER BY created_at DESC", conn)
+            # Fetch Instances (exclude DELETED)
+            df_instances = pd.read_sql("SELECT * FROM instances WHERE status != 'DELETED' ORDER BY created_at DESC", conn)
             
             if not df_instances.empty:
                 st.subheader("Running Instances")
@@ -466,7 +466,7 @@ elif st.session_state.page == "Live Monitor":
                         st.write(f"**Exchange:** {row['exchange']} | **Type:** {row['market_type']}")
                         st.write(f"**Created:** {row['created_at']}")
                         
-                        col_a, col_b = st.columns(2)
+                        col_a, col_b, col_c = st.columns(3)
                         with col_a:
                             if row['status'] == 'ACTIVE':
                                 if st.button("Stop Instance", key=f"stop_{row['id']}"):
@@ -479,6 +479,13 @@ elif st.session_state.page == "Live Monitor":
                                     conn.execute("UPDATE instances SET status='ACTIVE' WHERE id=?", (row['id'],))
                                     conn.commit()
                                     st.rerun()
+                        with col_c:
+                            if st.button("Delete Instance", key=f"delete_{row['id']}", type="secondary"):
+                                # Set to DELETED
+                                conn.execute("UPDATE instances SET status='DELETED' WHERE id=?", (row['id'],))
+                                conn.commit()
+                                st.warning(f"Instance {row['id']} marked for deletion. Hive Engine will clean up data.")
+                                st.rerun()
             else:
                 st.info("No active instances. Go to Strategy Builder to launch one.")
         except Exception as e:
