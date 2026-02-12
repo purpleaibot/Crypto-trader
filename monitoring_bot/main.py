@@ -5,7 +5,7 @@ import sqlite3
 import pandas as pd
 import ccxt
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from data_fetcher import DataFetcher
 from strategy import Strategy
 
@@ -75,7 +75,7 @@ class HiveEngine:
                         "market_type": row['market_type'],
                         "pairs": json.loads(row['pairs']) if row['pairs'] else [],
                         "config": config,
-                        "timeframes": config.get('strategy', {}).get('timeframes', ['1h'])
+                        "timeframes": config.get('timeframes', ['1h'])
                     }
                     self.active_instances[instance_id] = instance_data
                     
@@ -126,6 +126,35 @@ class HiveEngine:
             time.sleep(10)
             return
 
+        logger.info(f"🔄 Processing {len(self.active_instances)} instances...")
+        
+        # Process instances that are due (or force first run)
+        for iid, instance in list(self.active_instances.items()):
+            needs_processing = False
+            current_instance_min_sleep = float('inf')
+
+            # Force processing if never run before
+            if iid not in self.next_wake_times:
+                needs_processing = True
+            else:
+                if self.next_wake_times[iid] <= time.time():
+                    needs_processing = True
+
+            if needs_processing:
+                try:
+                    self.process_instance(instance)
+                    
+                    # Recalculate next wake time after processing
+                    instance_min_wait = float('inf')
+                    for tf in instance['timeframes']:
+                        wait = self.get_time_to_next_candle(tf)
+                        instance_min_wait = min(instance_min_wait, wait)
+                    
+                    self.next_wake_times[iid] = time.time() + instance_min_wait
+                except Exception as e:
+                    logger.error(f"Error processing {instance['name']}: {e}")
+
+        # Final check: sleep until the earliest next event
         current_time = time.time()
         next_event_time = self.get_next_event_time()
         
@@ -133,36 +162,6 @@ class HiveEngine:
             sleep_duration = next_event_time - current_time
             logger.info(f"✅ Cycle complete. Waiting {sleep_duration:.1f}s for next event.")
             time.sleep(sleep_duration)
-
-        logger.info(f"🔄 Processing {len(self.active_instances)} instances...")
-        
-        # Process instances that are due
-        for iid, instance in list(self.active_instances.items()): # Use list to allow modification during iteration
-            needs_processing = False
-            current_instance_min_sleep = float('inf')
-
-            for tf in instance['timeframes']:
-                # Check if this timeframe needs processing NOW
-                if self.next_wake_times.get(iid, float('inf')) <= time.time():
-                    needs_processing = True
-                    # Recalculate wait time for this timeframe
-                    wait = self.get_time_to_next_candle(tf)
-                    current_instance_min_sleep = min(current_instance_min_sleep, wait)
-                else:
-                    # If not due, but need to know when it IS due for overall min_sleep calculation
-                    current_instance_min_sleep = min(current_instance_min_sleep, self.next_wake_times.get(iid, float('inf')))
-            
-            if needs_processing:
-                try:
-                    self.process_instance(instance)
-                    self.next_wake_times[iid] = time.time() + current_instance_min_sleep # Reschedule
-                except Exception as e:
-                    logger.error(f"Error processing {instance['name']}: {e}")
-                    # Potentially mark instance as ERROR or retry after a delay
-
-            # If no timeframes need processing NOW for this instance, still update next_wake_times for future calculations if needed
-            if not needs_processing and iid in self.next_wake_times:
-                 pass # Keep existing next_wake_time
 
     def process_instance(self, instance):
         """Process a single instance: Fetch -> Analyze -> Signal"""
@@ -194,51 +193,90 @@ class HiveEngine:
                 else:
                     logger.warning(f"No data fetched for {symbol} ({tf}) for instance {instance['name']}")
 
-            # Analysis logic remains...
-            if data_map:
-                primary_tf = timeframes[0]
-                if primary_tf in data_map:
-                    df = data_map[primary_tf]
-                    df = self.strategy.calculate_indicators(df)
-                    
-                    trend = "NEUTRAL"
-                    if len(timeframes) > 1:
-                        trend_tf = timeframes[1]
-                        if trend_tf in data_map:
-                           trend = self.strategy.check_trend(data_map[trend_tf], None)
-                           logger.info(f"Trend on {trend_tf}: {trend}")
+            # If we have data for all timeframes, proceed to analysis
+            if len(data_map) == len(timeframes):
+                # Calculate indicators for all timeframes
+                processed_data = {}
+                valid_set = True
+                for tf in data_map:
+                    df_tf = data_map[tf]
+                    if df_tf is None or len(df_tf) < 50:
+                        valid_set = False
+                        break
+                    processed_data[tf] = self.strategy.calculate_indicators(df_tf)
 
-                    signal = self.strategy.check_trigger(df, trend)
-                    
+                if not valid_set:
+                    continue
+
+                # Trend Logic: Requires at least 2 timeframes (e.g. 1d and 4h)
+                trend = "NEUTRAL"
+                if len(timeframes) >= 3:
+                    # Multi-TF Trend check using TF2 and TF1 from sorted list
+                    try:
+                        df_large = processed_data[timeframes[2]]
+                        df_med = processed_data[timeframes[1]]
+                        
+                        # Check if we have enough data for indicators (EMA 200 needs 200 candles)
+                        if len(df_large) > 200 and len(df_med) > 200:
+                            trend = self.strategy.check_trend(df_large, df_med)
+                            logger.info(f"Trend for {symbol} using {timeframes[2]}/{timeframes[1]}: {trend}")
+                        else:
+                            logger.warning(f"Insufficient data for trend indicators on {symbol} (Large: {len(df_large)}, Med: {len(df_med)})")
+                    except Exception as e:
+                        logger.error(f"Trend check failed for {symbol}: {e}")
+                
+                # Trigger Logic: Primary timeframe (usually smallest)
+                primary_tf = timeframes[0]
+                try:
+                    signal = self.strategy.check_trigger(processed_data[primary_tf], trend)
                     if signal:
                         logger.info(f"🚀 SIGNAL [{instance['name']}]: {signal} on {symbol} ({primary_tf})")
-                        # TODO: Send to Analyze Agent with instance_id
-                        # self.send_to_agent(instance['id'], symbol, signal, ...)
+                        # TODO: Send to Analyze Agent
+                except Exception as e:
+                    logger.error(f"Trigger check failed for {symbol}: {e}")
 
     def get_time_to_next_candle(self, timeframe):
         """
         Calculate seconds until the next candle closes for a given timeframe.
         """
-        now = datetime.utcnow()
-        if timeframe.endswith('m'):
-            minutes = int(timeframe[:-1])
-            delta = timedelta(minutes=minutes)
-        elif timeframe.endswith('h'):
-            hours = int(timeframe[:-1])
-            delta = timedelta(hours=hours)
-        elif timeframe.endswith('d'):
-            days = int(timeframe[:-1])
-            delta = timedelta(days=days)
-        else:
-            return 60 # Default
+        now = datetime.now(timezone.utc)
+        tf_str = str(timeframe).lower()
+        
+        try:
+            # Map long forms to single characters for extraction
+            # KuCoin uses '1min', '1hour', '1day', '1week'
+            norm = tf_str.replace('min', 'm').replace('hour', 'h').replace('day', 'd').replace('week', 'w')
+            
+            # Extract number
+            num_part = "".join(filter(str.isdigit, norm))
+            val = int(num_part) if num_part else 1
+            
+            # Extract unit characters
+            unit_part = "".join(filter(lambda x: not x.isdigit(), norm))
+            unit = 'm' if 'm' in unit_part else ('h' if 'h' in unit_part else ('d' if 'd' in unit_part else 'w' if 'w' in unit_part else 'h'))
 
-        # Logic: find next boundary
-        # For minutes/hours, we align to the start of the epoch or a fixed point
-        # Simpler version:
-        total_seconds = delta.total_seconds()
-        elapsed = (now - datetime(1970, 1, 1)).total_seconds()
-        wait = total_seconds - (elapsed % total_seconds)
-        return wait
+            if unit == 'm':
+                delta = timedelta(minutes=val)
+                next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=val - (now.minute % val))
+            elif unit == 'h':
+                delta = timedelta(hours=val)
+                next_boundary = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=val - (now.hour % val))
+            elif unit == 'd':
+                delta = timedelta(days=val)
+                next_boundary = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=val)
+            elif unit == 'w':
+                delta = timedelta(weeks=val)
+                # Align to start of week (Monday 00:00)
+                days_to_monday = now.weekday()
+                next_boundary = (now - timedelta(days=days_to_monday)).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(weeks=val)
+            else:
+                return 60
+        except Exception:
+            return 60
+
+        wait = (next_boundary - now).total_seconds()
+        # Ensure positive wait and add 5s buffer
+        return max(0, wait) + 5
 
     def cleanup_instance_data(self, instance_id):
         """Clean up candles associated ONLY with this specific instance_id"""
