@@ -1,108 +1,135 @@
 import time
 import logging
-import requests
+import json
+import sqlite3
+import pandas as pd
+import asyncio
+import concurrent.futures
 from data_fetcher import DataFetcher
-from capital_manager import CapitalManager
 from strategy import Strategy
+from datetime import datetime
 
 # Setup Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("MonitoringBot")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("HiveEngine")
 
+# Configuration
+DB_PATH = "trades.db"
 ANALYZE_AGENT_URL = "http://localhost:8000/analyze"
 
-def main():
-    logger.info("Starting Monitoring Bot...")
-    
-    # 1. Initialize Components
-    # Example Instance: 500 USDT total, 150 Start, Trading BTC/USDT on Binance
-    instance_config = {
-        "exchange": "binance",
-        "symbol": "BTC/USDT",
-        "start_amount": 150,
-        "risk_percent": 0.02
-    }
-    
-    fetcher = DataFetcher(exchange_id=instance_config["exchange"])
-    cap_manager = CapitalManager(start_amount=instance_config["start_amount"])
-    strategy = Strategy()
-    
-    logger.info(f"Instance Deployed: {instance_config['symbol']} on {instance_config['exchange']}")
-    
-    # 2. Main Loop (Simplified for V1 stub)
-    try:
-        while True:
-            # 2a. Check Level
-            level, min_val = cap_manager.get_current_level()
-            logger.info(f"Current Level: {level} (Min Base: {min_val})")
+class HiveEngine:
+    def __init__(self):
+        self.active_instances = {} # {id: config}
+        self.fetchers = {} # {exchange: DataFetcher}
+        self.strategy = Strategy()
+        logger.info("🐝 Hive Engine Initialized")
+
+    def load_instances(self):
+        """Load ACTIVE instances from DB"""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            # Create table if missing (safety check)
+            conn.execute('''CREATE TABLE IF NOT EXISTS instances (
+                id TEXT PRIMARY KEY, name TEXT, exchange TEXT, base_currency TEXT, 
+                market_type TEXT, strategy_config TEXT, pairs TEXT, 
+                status TEXT DEFAULT 'STOPPED', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
             
-            if level == "CRITICAL_LOW":
-                logger.critical("KILL SWITCH TRIGGERED. Stopping instance.")
-                break
-                
-            # 2b. Fetch Data for Multiple Timeframes (Stub: fetch 1D, 4H, 1H)
-            logger.info("Fetching Market Data...")
+            df = pd.read_sql("SELECT * FROM instances WHERE status='ACTIVE'", conn)
+            conn.close()
             
-            df_1d = fetcher.fetch_ohlcv(instance_config["symbol"], "1d", limit=300)
-            df_4h = fetcher.fetch_ohlcv(instance_config["symbol"], "4h", limit=300)
-            df_1h = fetcher.fetch_ohlcv(instance_config["symbol"], "1h", limit=100)
-            
-            if df_1d is not None and df_4h is not None and df_1h is not None:
-                # 2c. Calculate Indicators
-                df_1d = strategy.calculate_indicators(df_1d)
-                df_4h = strategy.calculate_indicators(df_4h)
-                df_1h = strategy.calculate_indicators(df_1h)
+            current_ids = set()
+            for _, row in df.iterrows():
+                instance_id = row['id']
+                current_ids.add(instance_id)
                 
-                # 2d. Check Higher Timeframe Trend (1D & 4H)
-                trend_direction = strategy.check_trend(df_1d, df_4h)
-                logger.info(f"Higher Timeframe Trend: {trend_direction}")
-                
-                if trend_direction != 'NEUTRAL':
-                    # 2e. Check Lower Timeframe Trigger (1H)
-                    signal = strategy.check_trigger(df_1h, trend_direction)
+                # Register new or update existing
+                if instance_id not in self.active_instances:
+                    logger.info(f"➕ Loaded Instance: {row['name']} ({row['exchange']})")
+                    self.active_instances[instance_id] = {
+                        "id": row['id'],
+                        "name": row['name'],
+                        "exchange": row['exchange'],
+                        "pairs": json.loads(row['pairs']) if row['pairs'] else [],
+                        "config": json.loads(row['strategy_config']) if row['strategy_config'] else {}
+                    }
                     
-                    if signal:
-                        logger.info(f"SIGNAL DETECTED: {signal} {instance_config['symbol']}")
-                        logger.info("Sending to Analyze Agent (NanoClaw)...")
-                        
-                        # Call NanoClaw API
-                        payload = {
-                            "symbol": instance_config["symbol"],
-                            "timeframe": "1h",
-                            "signal_type": signal,
-                            "price": df_1h.iloc[-1]['close'],
-                            "indicators": {
-                                "rsi": df_1h.iloc[-1]['RSI'],
-                                "ema_10": df_1h.iloc[-1]['EMA_10'],
-                                "ema_20": df_1h.iloc[-1]['EMA_20']
-                            },
-                            "trend": trend_direction
-                        }
-                        
-                        try:
-                            response = requests.post(ANALYZE_AGENT_URL, json=payload, timeout=10)
-                            if response.status_code == 200:
-                                decision = response.json()
-                                logger.info(f"NanoClaw Decision: {decision}")
-                                if decision.get("decision") == "APPROVE":
-                                    logger.info(">>> TRADE APPROVED! Sending to Execution Engine (Next Step)...")
-                                else:
-                                    logger.info(">>> TRADE REJECTED by Agent.")
-                            else:
-                                logger.error(f"NanoClaw Error: {response.text}")
-                        except Exception as e:
-                            logger.error(f"Failed to reach Analyze Agent: {e}")
-                            
-                    else:
-                        logger.info("No trigger on 1H.")
-                else:
-                    logger.info("Market is Neutral/Choppy. No trade.")
-                
-            # Sleep to simulate interval (in real bot, this is a scheduler)
-            time.sleep(60) 
+                    # Initialize Fetcher for this exchange if needed
+                    if row['exchange'] not in self.fetchers:
+                        self.fetchers[row['exchange']] = DataFetcher(exchange_id=row['exchange'])
+
+            # Remove stopped instances
+            active_ids = list(self.active_instances.keys())
+            for iid in active_ids:
+                if iid not in current_ids:
+                    logger.info(f"➖ Unloaded Instance: {self.active_instances[iid]['name']}")
+                    del self.active_instances[iid]
+                    
+        except Exception as e:
+            logger.error(f"Error loading instances: {e}")
+
+    def run_cycle(self):
+        """Main execution loop"""
+        self.load_instances()
+        
+        if not self.active_instances:
+            logger.info("💤 No active instances. Waiting...")
+            time.sleep(10)
+            return
+
+        logger.info(f"🔄 Cycling through {len(self.active_instances)} instances...")
+        
+        for iid, instance in self.active_instances.items():
+            try:
+                self.process_instance(instance)
+            except Exception as e:
+                logger.error(f"Error processing {instance['name']}: {e}")
+        
+        logger.info("✅ Cycle complete. Sleeping...")
+        time.sleep(60) # Main heartbeat
+
+    def process_instance(self, instance):
+        """Process a single instance: Fetch -> Analyze -> Signal"""
+        exchange = instance['exchange']
+        fetcher = self.fetchers.get(exchange)
+        if not fetcher: return
+
+        pairs = instance['pairs']
+        # Limit processing for now to avoid overloading
+        # In V2, we batch this via Async
+        
+        logger.info(f"[{instance['name']}] Checking {len(pairs)} pairs...")
+        
+        for pair_data in pairs:
+            # pair_data structure from dashboard might be a dict or string
+            symbol = pair_data['Symbol'] if isinstance(pair_data, dict) else pair_data
             
-    except KeyboardInterrupt:
-        logger.info("Stopping Bot...")
+            # 1. Fetch Data (Optimized: Just 1H for trigger check for now)
+            # In real PROD, fetcher should support bulk fetch
+            df_1h = fetcher.fetch_ohlcv(symbol, "1h", limit=50)
+            
+            if df_1h is not None and not df_1h.empty:
+                # 2. Strategy Check
+                df_1h = self.strategy.calculate_indicators(df_1h)
+                
+                # Mock Trend (Needs 4H/1D in full version)
+                trend = "NEUTRAL" 
+                
+                signal = self.strategy.check_trigger(df_1h, trend)
+                
+                if signal:
+                    logger.info(f"🚀 SIGNAL [{instance['name']}]: {signal} on {symbol}")
+                    # TODO: Send to Analyze Agent with instance_id
+                    # self.send_to_agent(instance['id'], symbol, signal, ...)
 
 if __name__ == "__main__":
-    main()
+    engine = HiveEngine()
+    while True:
+        try:
+            engine.run_cycle()
+        except KeyboardInterrupt:
+            logger.info("Hive Engine Stopped.")
+            break
+        except Exception as e:
+            logger.critical(f"Hive Crash: {e}")
+            time.sleep(10)

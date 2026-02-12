@@ -1,43 +1,48 @@
-# System Architecture - Crypto-Trader
+# System Architecture
 
 ## Overview
-The system follows a microservices-inspired architecture, ensuring modularity, scalability, and fault tolerance.
+The system follows a **Event-Driven Hive Architecture**.
+
+```mermaid
+graph TD
+    UI[Streamlit Dashboard] -->|Writes Config| DB[(SQLite DB)]
+    UI -->|Reads Status| DB
+    
+    Hive[Hive Engine (Monitoring Bot)] -->|Reads Config| DB
+    Hive -->|Fetches Data| Exchanges[Binance/KuCoin/Gate]
+    
+    Hive -->|Signal Detected| Agent[Analyze Agent API]
+    Agent -->|Validation| LLM[LLM / Tools]
+    
+    Agent -->|Approved| Trader[Trading Bot API]
+    Trader -->|Execute Order| Exchanges
+    Trader -->|Log Trade| DB
+```
 
 ## Components
 
-### 1. Data Layer
-*   **InfluxDB:** Stores high-frequency candle data.
-*   **Relational DB (PostgreSQL/SQLite):** Stores User profiles, Instance configurations, Trade history (ROI), and Agent learning data.
-*   **Redis (Optional):** Caching for real-time UI updates and inter-service messaging.
+### 1. The Hive Engine (Monitoring Bot)
+*   **Role:** The heartbeat of the system.
+*   **Behavior:** 
+    *   Loads all `ACTIVE` instances from `instances` table.
+    *   Iterates through each instance's `pairs` list.
+    *   Fetches market data (Optimized bulk fetch).
+    *   Applies Technical Analysis (TA).
+    *   Triggers the Agent if conditions are met.
+*   **Scale:** Designed to handle 20+ instances and 2000+ pairs on a single 4GB RAM node.
 
-### 2. Service Layer
-*   **Monitoring Service:**
-    *   Runs scheduled jobs (Candle Fetch).
-    *   Calculates Indicators (Pandas/TA-Lib).
-    *   Manages Instance State (Levels).
-*   **Analysis Service (NanoClaw):**
-    *   Isolated Docker container.
-    *   Interacts with LLM APIs.
-    *   Performs Web Search.
-*   **Execution Service:**
-    *   Manages Exchange WebSocket connections for order updates.
-    *   Executes Limit Orders via CCXT or direct API.
+### 2. Analyze Agent (NanoClaw)
+*   **Role:** Trade Validator.
+*   **Input:** Signal (Symbol, Price, Type, Trend).
+*   **Process:** Checks news, sentiment, and market structure.
+*   **Output:** `APPROVE` or `REJECT`.
 
-### 3. Interface Layer
-*   **Web Dashboard:** Responsive frontend.
-*   **Telegram Bot:** Push notifications and basic command control (e.g., `/stop`).
+### 3. Trading Bot (Executioner)
+*   **Role:** Order Router.
+*   **Input:** Approved Signal + Instance ID.
+*   **Process:** Looks up API keys for the specific Instance and places the order.
 
-## Data Flow
-1.  **Monitoring Bot** fetches candle -> Updates InfluxDB.
-2.  **Monitoring Bot** runs strategy -> Detects Signal.
-3.  **Monitoring Bot** sends Signal Context to **Analyze Agent**.
-4.  **Analyze Agent** queries LLM + Web -> Returns Decision.
-5.  If Approved: **Analyze Agent** sends Order Details to **Trading Bot**.
-6.  **Trading Bot** places Limit Order -> Updates DB.
-7.  **Trading Bot** monitors fill/TP/SL -> Updates DB on close.
-8.  **Monitoring Bot** reads new PnL -> Adjusts Capital Level.
-
-## Security
-*   **API Keys:** Encrypted at rest.
-*   **Sandboxing:** Analyze Agent runs with restricted network access (allowlist).
-*   **Kill Switch:** Hard-coded logic in Execution Service to halt on equity breach.
+### 4. Database Schema
+*   `instances`: Stores configuration, watchlist, and status.
+*   `trades`: Stores trade history linked to `instance_id`.
+*   `candles`: Local cache of OHLCV data to reduce API calls.
