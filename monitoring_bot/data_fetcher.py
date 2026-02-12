@@ -9,13 +9,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class DataFetcher:
-    def __init__(self, exchange_id='binance', db_path='candles.db'):
+    def __init__(self, exchange_id='binance', market_type='Spot', db_path='candles.db'):
         self.exchange_id = exchange_id
-        self.exchange = getattr(ccxt, exchange_id)()
+        self.market_type = market_type
+        
+        # Initialize Exchange with Options (Futures vs Spot)
+        exchange_class = getattr(ccxt, exchange_id)
+        options = {}
+        if market_type == 'Futures':
+            options = {'defaultType': 'future'}
+        elif market_type == 'Spot':
+            options = {'defaultType': 'spot'}
+            
+        self.exchange = exchange_class(options)
         self.exchange.load_markets()
+        
         self.db_path = db_path
         self._init_db()
-        logger.info(f"Initialized {exchange_id} DataFetcher with DB {db_path}")
+        logger.info(f"Initialized {exchange_id} ({market_type}) DataFetcher with DB {db_path}")
 
     def _init_db(self):
         conn = sqlite3.connect(self.db_path)
@@ -47,12 +58,17 @@ class DataFetcher:
         # 2. Fetch from exchange
         if last_ts:
             # Fetch since last known candle
+            # ccxt fetch_ohlcv since is in ms
             since = int(last_ts.timestamp() * 1000) + 1
+            # If gap is huge, limit 500 might not cover it, but better than nothing
+            # Ideally loop, but for now single fetch
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         else:
-            # Initial load: Fetch last 500
-            since = self.exchange.milliseconds() - (limit * self.exchange.parse_timeframe(timeframe) * 1000)
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            # Initial load: Fetch last 500 (Configurable limit)
+            # Calculated relative to NOW
+            # duration_ms = self.exchange.parse_timeframe(timeframe) * 1000
+            # since = self.exchange.milliseconds() - (limit * duration_ms)
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
 
         if not ohlcv:
             return self.get_local_candles(symbol, timeframe, limit)
@@ -62,13 +78,18 @@ class DataFetcher:
         df_new['timestamp'] = pd.to_datetime(df_new['timestamp'], unit='ms')
         
         # Ensure only CLOSED candles are saved
+        # CCXT usually returns closed candles if since is old, but most recent might be open
+        # We need to filter out the "current" open candle
         now = datetime.utcnow()
         duration_seconds = self.exchange.parse_timeframe(timeframe)
+        
+        # A candle with timestamp T closes at T + duration
+        # If T + duration > now, it is still open
         df_new = df_new[df_new['timestamp'] + timedelta(seconds=duration_seconds) <= now]
 
         if not df_new.empty:
             self._save_to_db(df_new, symbol, timeframe)
-            logger.info(f"Synced {len(df_new)} new candles for {symbol} on {self.exchange_id}")
+            # logger.info(f"Synced {len(df_new)} new candles for {symbol} on {self.exchange_id}")
 
         return self.get_local_candles(symbol, timeframe, limit)
 

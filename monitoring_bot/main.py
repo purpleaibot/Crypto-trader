@@ -3,11 +3,11 @@ import logging
 import json
 import sqlite3
 import pandas as pd
-import asyncio
-import concurrent.futures
+import ccxt
+import math
+from datetime import datetime, timedelta
 from data_fetcher import DataFetcher
 from strategy import Strategy
-from datetime import datetime
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,15 +20,15 @@ ANALYZE_AGENT_URL = "http://localhost:8000/analyze"
 class HiveEngine:
     def __init__(self):
         self.active_instances = {} # {id: config}
-        self.fetchers = {} # {exchange: DataFetcher}
+        self.fetchers = {} # {exchange_key: DataFetcher}
         self.strategy = Strategy()
+        self.next_wake_time = 0
         logger.info("🐝 Hive Engine Initialized")
 
     def load_instances(self):
         """Load ACTIVE instances from DB"""
         try:
             conn = sqlite3.connect(DB_PATH)
-            # Create table if missing (safety check)
             conn.execute('''CREATE TABLE IF NOT EXISTS instances (
                 id TEXT PRIMARY KEY, name TEXT, exchange TEXT, base_currency TEXT, 
                 market_type TEXT, strategy_config TEXT, pairs TEXT, 
@@ -46,17 +46,27 @@ class HiveEngine:
                 # Register new or update existing
                 if instance_id not in self.active_instances:
                     logger.info(f"➕ Loaded Instance: {row['name']} ({row['exchange']})")
+                    
+                    config = json.loads(row['strategy_config']) if row['strategy_config'] else {}
+                    
                     self.active_instances[instance_id] = {
                         "id": row['id'],
                         "name": row['name'],
                         "exchange": row['exchange'],
+                        "market_type": row['market_type'],
                         "pairs": json.loads(row['pairs']) if row['pairs'] else [],
-                        "config": json.loads(row['strategy_config']) if row['strategy_config'] else {}
+                        "config": config,
+                        "timeframes": config.get('strategy', {}).get('timeframes', ['1h']) # Default if missing
                     }
                     
-                    # Initialize Fetcher for this exchange if needed
-                    if row['exchange'] not in self.fetchers:
-                        self.fetchers[row['exchange']] = DataFetcher(exchange_id=row['exchange'])
+                    # Initialize Fetcher (Keyed by Exchange + Type)
+                    # e.g. "binance_Futures" vs "binance_Spot"
+                    fetcher_key = f"{row['exchange']}_{row['market_type']}"
+                    if fetcher_key not in self.fetchers:
+                        self.fetchers[fetcher_key] = DataFetcher(
+                            exchange_id=row['exchange'], 
+                            market_type=row['market_type']
+                        )
 
             # Remove stopped instances
             active_ids = list(self.active_instances.keys())
@@ -68,59 +78,99 @@ class HiveEngine:
         except Exception as e:
             logger.error(f"Error loading instances: {e}")
 
+    def get_time_to_next_candle(self, timeframe):
+        """
+        Calculate seconds remaining until the next candle closes + 5 seconds buffer.
+        """
+        # Parse timeframe to seconds using CCXT logic manually or helper
+        # Simple map for standard TFs
+        tf_seconds = {
+            '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+            '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600, '8h': 28800, '12h': 43200,
+            '1d': 86400, '1w': 604800
+        }
+        
+        duration = tf_seconds.get(timeframe, 3600)
+        
+        now_ts = time.time()
+        # Find start of current candle
+        # Candle start = now // duration * duration
+        # Next close = Candle start + duration
+        next_close = (int(now_ts) // duration * duration) + duration
+        
+        wait_seconds = next_close - now_ts + 5 # +5s buffer
+        return max(5, wait_seconds) # Wait at least 5s
+
     def run_cycle(self):
-        """Main execution loop"""
+        """Main execution loop with Smart Sleep"""
         self.load_instances()
         
         if not self.active_instances:
-            logger.info("💤 No active instances. Waiting...")
+            logger.info("💤 No active instances. Waiting 10s...")
             time.sleep(10)
             return
 
+        min_sleep = 3600 # Default cap
+        
         logger.info(f"🔄 Cycling through {len(self.active_instances)} instances...")
         
         for iid, instance in self.active_instances.items():
             try:
+                # 1. Process
                 self.process_instance(instance)
+                
+                # 2. Determine Sleep Requirement for this instance
+                for tf in instance['timeframes']:
+                    wait = self.get_time_to_next_candle(tf)
+                    if wait < min_sleep:
+                        min_sleep = wait
+                        
             except Exception as e:
                 logger.error(f"Error processing {instance['name']}: {e}")
         
-        logger.info("✅ Cycle complete. Sleeping...")
-        time.sleep(60) # Main heartbeat
+        logger.info(f"✅ Cycle complete. Next wake in {min_sleep:.1f}s")
+        time.sleep(min_sleep)
 
     def process_instance(self, instance):
         """Process a single instance: Fetch -> Analyze -> Signal"""
-        exchange = instance['exchange']
-        fetcher = self.fetchers.get(exchange)
+        fetcher_key = f"{instance['exchange']}_{instance['market_type']}"
+        fetcher = self.fetchers.get(fetcher_key)
         if not fetcher: return
 
         pairs = instance['pairs']
-        # Limit processing for now to avoid overloading
-        # In V2, we batch this via Async
+        timeframes = instance['timeframes']
         
-        logger.info(f"[{instance['name']}] Checking {len(pairs)} pairs...")
+        # logger.info(f"[{instance['name']}] Checking {len(pairs)} pairs on {timeframes}...")
         
         for pair_data in pairs:
-            # pair_data structure from dashboard might be a dict or string
             symbol = pair_data['Symbol'] if isinstance(pair_data, dict) else pair_data
             
-            # 1. Fetch Data (Optimized: Just 1H for trigger check for now)
-            # In real PROD, fetcher should support bulk fetch
-            df_1h = fetcher.fetch_ohlcv(symbol, "1h", limit=50)
+            # Loop through ALL configured timeframes
+            data_map = {}
+            for tf in timeframes:
+                # Fetch 500 candles (default limit in DataFetcher)
+                df = fetcher.fetch_ohlcv(symbol, tf, limit=500)
+                if df is not None and not df.empty:
+                    data_map[tf] = df
             
-            if df_1h is not None and not df_1h.empty:
-                # 2. Strategy Check
-                df_1h = self.strategy.calculate_indicators(df_1h)
-                
-                # Mock Trend (Needs 4H/1D in full version)
-                trend = "NEUTRAL" 
-                
-                signal = self.strategy.check_trigger(df_1h, trend)
-                
-                if signal:
-                    logger.info(f"🚀 SIGNAL [{instance['name']}]: {signal} on {symbol}")
-                    # TODO: Send to Analyze Agent with instance_id
-                    # self.send_to_agent(instance['id'], symbol, signal, ...)
+            # TODO: Pass data_map to Strategy to check multi-timeframe conditions
+            # For V1 MVP, we just check the smallest TF or the first one
+            if data_map:
+                primary_tf = timeframes[0] # Assuming first is "Small TF" or Trigger
+                if primary_tf in data_map:
+                    df = data_map[primary_tf]
+                    
+                    # Calculate Indicators
+                    df = self.strategy.calculate_indicators(df)
+                    
+                    # Mock Trend Logic (In future, use larger TF from data_map)
+                    trend = "NEUTRAL"
+                    
+                    signal = self.strategy.check_trigger(df, trend)
+                    
+                    if signal:
+                        logger.info(f"🚀 SIGNAL [{instance['name']}]: {signal} on {symbol} ({primary_tf})")
+                        # self.send_to_agent(...)
 
 if __name__ == "__main__":
     engine = HiveEngine()
