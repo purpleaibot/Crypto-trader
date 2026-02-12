@@ -33,6 +33,7 @@ class DataFetcher:
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS candles (
+                instance_id TEXT,
                 exchange TEXT,
                 symbol TEXT,
                 timeframe TEXT,
@@ -42,88 +43,80 @@ class DataFetcher:
                 low REAL,
                 close REAL,
                 volume REAL,
-                PRIMARY KEY (exchange, symbol, timeframe, timestamp)
+                PRIMARY KEY (instance_id, symbol, timeframe, timestamp)
             )
         ''')
         conn.commit()
         conn.close()
 
-    def fetch_and_sync(self, symbol, timeframe, limit=500):
+    def fetch_and_sync(self, instance_id, symbol, timeframe, limit=500):
         """
         Main logic: Check local DB, fetch missing, validate order, and store.
         """
         # 1. Get latest timestamp from DB
-        last_ts = self._get_last_timestamp(symbol, timeframe)
+        last_ts = self._get_last_timestamp(instance_id, symbol, timeframe)
         
         # 2. Fetch from exchange
         if last_ts:
             # Fetch since last known candle
             # ccxt fetch_ohlcv since is in ms
             since = int(last_ts.timestamp() * 1000) + 1
-            # If gap is huge, limit 500 might not cover it, but better than nothing
-            # Ideally loop, but for now single fetch
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         else:
-            # Initial load: Fetch last 500 (Configurable limit)
-            # Calculated relative to NOW
-            # duration_ms = self.exchange.parse_timeframe(timeframe) * 1000
-            # since = self.exchange.milliseconds() - (limit * duration_ms)
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
 
         if not ohlcv:
-            return self.get_local_candles(symbol, timeframe, limit)
+            return self.get_local_candles(instance_id, symbol, timeframe, limit)
 
         # 3. Validate & Save
         df_new = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_new['timestamp'] = pd.to_datetime(df_new['timestamp'], unit='ms')
         
-        # Ensure only CLOSED candles are saved
-        # CCXT usually returns closed candles if since is old, but most recent might be open
-        # We need to filter out the "current" open candle
+        # Ensure only CLOSED candles are saved (with 5s buffer)
         now = datetime.utcnow()
         duration_seconds = self.exchange.parse_timeframe(timeframe)
         
-        # A candle with timestamp T closes at T + duration
-        # If T + duration > now, it is still open
-        df_new = df_new[df_new['timestamp'] + timedelta(seconds=duration_seconds) <= now]
+        # 5-second rule: Only save if candle closed at least 5s ago
+        df_new = df_new[df_new['timestamp'] + timedelta(seconds=duration_seconds + 5) <= now]
 
         if not df_new.empty:
-            self._save_to_db(df_new, symbol, timeframe)
-            # logger.info(f"Synced {len(df_new)} new candles for {symbol} on {self.exchange_id}")
+            self._save_to_db(instance_id, df_new, symbol, timeframe)
 
-        return self.get_local_candles(symbol, timeframe, limit)
+        return self.get_local_candles(instance_id, symbol, timeframe, limit)
 
-    def _get_last_timestamp(self, symbol, timeframe):
+    def _get_last_timestamp(self, instance_id, symbol, timeframe):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT MAX(timestamp) FROM candles 
-            WHERE exchange = ? AND symbol = ? AND timeframe = ?
-        ''', (self.exchange_id, symbol, timeframe))
+            WHERE instance_id = ? AND symbol = ? AND timeframe = ?
+        ''', (instance_id, symbol, timeframe))
         res = cursor.fetchone()[0]
         conn.close()
         return pd.to_datetime(res) if res else None
 
-    def _save_to_db(self, df, symbol, timeframe):
+    def _save_to_db(self, instance_id, df, symbol, timeframe):
         conn = sqlite3.connect(self.db_path)
+        df['instance_id'] = instance_id
         df['exchange'] = self.exchange_id
         df['symbol'] = symbol
         df['timeframe'] = timeframe
+        # Use replace or ignore for potential duplicates if sync overlaps
         df.to_sql('candles', conn, if_exists='append', index=False, method='multi')
         conn.commit()
         conn.close()
 
-    def get_local_candles(self, symbol, timeframe, limit=500):
+    def get_local_candles(self, instance_id, symbol, timeframe, limit=500):
         conn = sqlite3.connect(self.db_path)
         query = '''
             SELECT timestamp, open, high, low, close, volume FROM candles 
-            WHERE exchange = ? AND symbol = ? AND timeframe = ?
+            WHERE instance_id = ? AND symbol = ? AND timeframe = ?
             ORDER BY timestamp DESC LIMIT ?
         '''
-        df = pd.read_sql(query, conn, params=(self.exchange_id, symbol, timeframe, limit))
+        df = pd.read_sql(query, conn, params=(instance_id, symbol, timeframe, limit))
         conn.close()
         return df.sort_values('timestamp') if not df.empty else None
 
-    def fetch_ohlcv(self, symbol, timeframe, limit=500):
+    def fetch_ohlcv(self, instance_id, symbol, timeframe, limit=500):
         # Compatibility wrapper for existing code
-        return self.fetch_and_sync(symbol, timeframe, limit)
+        return self.fetch_and_sync(instance_id, symbol, timeframe, limit)

@@ -29,7 +29,7 @@ class HiveEngine:
         """Load ACTIVE instances from DB and handle DELETED ones"""
         try:
             conn = sqlite3.connect(DB_PATH)
-            # Ensure table exists
+            # Ensure table exists with instance_id column
             conn.execute('''CREATE TABLE IF NOT EXISTS instances (
                 id TEXT PRIMARY KEY, name TEXT, exchange TEXT, base_currency TEXT, 
                 market_type TEXT, strategy_config TEXT, pairs TEXT, 
@@ -48,8 +48,8 @@ class HiveEngine:
                 if iid in self.next_wake_times:
                     del self.next_wake_times[iid]
                 
-                # Cleanup database data (candles)
-                self.cleanup_instance_data(row)
+                # Cleanup database data (candles) tied to THIS instance_id
+                self.cleanup_instance_data(iid)
                 
                 # Permanently remove from instances table
                 conn.execute("DELETE FROM instances WHERE id=?", (iid,))
@@ -174,44 +174,38 @@ class HiveEngine:
 
         pairs = instance['pairs']
         timeframes = instance['timeframes']
+        instance_id = instance['id']
         
         logger.info(f"[{instance['name']}] Checking {len(pairs)} pairs on {timeframes}...")
         
         for pair_data in pairs:
             symbol = pair_data['Symbol'] if isinstance(pair_data, dict) else pair_data
             
-            # Fetch data for all required timeframes for this pair
+            # Fetch data for ALL required timeframes for this pair
             data_map = {}
             for tf in timeframes:
-                # Fetch 500 candles, handling potential missing data by checking last_ts in fetcher
-                df = fetcher.fetch_and_sync(symbol, tf, limit=500)
+                # Map timeframe string to exchange-specific format
+                exchange_tf = fetcher.exchange.timeframes.get(tf, tf)
+                
+                # Fetch 500 candles with instance isolation
+                df = fetcher.fetch_and_sync(instance_id, symbol, exchange_tf, limit=500)
                 if df is not None and not df.empty:
                     data_map[tf] = df
                 else:
                     logger.warning(f"No data fetched for {symbol} ({tf}) for instance {instance['name']}")
 
-            # If we have data for at least one timeframe, proceed to analysis
+            # Analysis logic remains...
             if data_map:
-                # TODO: Pass data_map to Strategy to check multi-timeframe conditions
-                # For V1 MVP, we only use the smallest TF or the first one for simplicity
-                # A real strategy would need to intelligently combine indicators from multiple TFs
-                
-                # Determine primary TF for signal checking (e.g., smallest or trigger TF)
-                # Assuming the first timeframe in the list is the primary trigger TF
                 primary_tf = timeframes[0]
                 if primary_tf in data_map:
                     df = data_map[primary_tf]
-                    
-                    # Calculate Indicators on the primary TF's DataFrame
                     df = self.strategy.calculate_indicators(df)
                     
-                    # Mock Trend Logic (In future, use larger TF from data_map)
-                    # This needs to be dynamic based on instance config and available TFs
                     trend = "NEUTRAL"
-                    if len(timeframes) > 1: # Try to use a larger timeframe for trend if available
-                        trend_tf = timeframes[1] # e.g. Use the medium TF for trend
+                    if len(timeframes) > 1:
+                        trend_tf = timeframes[1]
                         if trend_tf in data_map:
-                           trend = self.strategy.check_trend(data_map[trend_tf], None) # Simplified check
+                           trend = self.strategy.check_trend(data_map[trend_tf], None)
                            logger.info(f"Trend on {trend_tf}: {trend}")
 
                     signal = self.strategy.check_trigger(df, trend)
@@ -221,25 +215,43 @@ class HiveEngine:
                         # TODO: Send to Analyze Agent with instance_id
                         # self.send_to_agent(instance['id'], symbol, signal, ...)
 
-    def cleanup_instance_data(self, row):
-        """Clean up candles associated with an instance's pairs"""
+    def get_time_to_next_candle(self, timeframe):
+        """
+        Calculate seconds until the next candle closes for a given timeframe.
+        """
+        now = datetime.utcnow()
+        if timeframe.endswith('m'):
+            minutes = int(timeframe[:-1])
+            delta = timedelta(minutes=minutes)
+        elif timeframe.endswith('h'):
+            hours = int(timeframe[:-1])
+            delta = timedelta(hours=hours)
+        elif timeframe.endswith('d'):
+            days = int(timeframe[:-1])
+            delta = timedelta(days=days)
+        else:
+            return 60 # Default
+
+        # Logic: find next boundary
+        # For minutes/hours, we align to the start of the epoch or a fixed point
+        # Simpler version:
+        total_seconds = delta.total_seconds()
+        elapsed = (now - datetime(1970, 1, 1)).total_seconds()
+        wait = total_seconds - (elapsed % total_seconds)
+        return wait
+
+    def cleanup_instance_data(self, instance_id):
+        """Clean up candles associated ONLY with this specific instance_id"""
         CANDLES_DB = "candles.db"
         try:
             conn = sqlite3.connect(CANDLES_DB)
-            pairs = json.loads(row['pairs']) if row['pairs'] else []
-            exchange = row['exchange']
-            
-            for pair_data in pairs:
-                symbol = pair_data['Symbol'] if isinstance(pair_data, dict) else pair_data
-                # Delete candles for this exchange/symbol combination
-                # Note: This is shared data. Deleting here affects other instances using same pair.
-                conn.execute("DELETE FROM candles WHERE exchange=? AND symbol=?", (exchange, symbol))
-            
+            # Delete candles for this specific instance_id
+            conn.execute("DELETE FROM candles WHERE instance_id=?", (instance_id,))
             conn.commit()
             conn.close()
-            logger.info(f"🧼 Cleaned candles for {len(pairs)} pairs on {exchange}")
+            logger.info(f"🧼 Cleaned candles for instance {instance_id}")
         except Exception as e:
-            logger.error(f"Failed candle cleanup: {e}")
+            logger.error(f"Failed candle cleanup for {instance_id}: {e}")
 
 if __name__ == "__main__":
     engine = HiveEngine()

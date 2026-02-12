@@ -1,0 +1,8 @@
+2026-02-12 19:35:59,963 - INFO - 🐝 Hive Engine Initialized
+2026-02-12 19:35:59,965 - INFO - ➕ Loaded Instance: kucoin_Spot_f7ba13c0 (kucoin)
+2026-02-12 19:36:01,114 - INFO - Initialized kucoin (Spot) DataFetcher with DB candles.db
+2026-02-12 19:36:01,114 - INFO - ➕ Loaded Instance: gateio_Futures_ff3603fa (gateio)
+2026-02-12 19:36:09,357 - INFO - Initialized gateio (Futures) DataFetcher with DB candles.db
+/home/ubuntu/.openclaw/workspace/Crypto-trader/monitoring_bot/main.py:222: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  now = datetime.utcnow()
+2026-02-12 19:36:09,359 - INFO - ✅ Cycle complete. Waiting 1430.6s for next event.
