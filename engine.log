@@ -1,14 +1,26 @@
-2026-02-13 03:41:04,711 - INFO - 🐝 Hive Engine Initialized
-2026-02-13 03:41:04,713 - INFO - ➕ Loaded Instance: kucoin_Spot_f7ba13c0 (kucoin)
-2026-02-13 03:41:06,087 - INFO - Initialized kucoin (Spot) DataFetcher with DB candles.db
-2026-02-13 03:41:06,088 - INFO - ➕ Loaded Instance: gateio_Futures_ff3603fa (gateio)
-2026-02-13 03:41:13,900 - INFO - Initialized gateio (Futures) DataFetcher with DB candles.db
-2026-02-13 03:41:13,902 - INFO - 🔄 Processing 2 instances...
-2026-02-13 03:41:13,902 - INFO - [kucoin_Spot_f7ba13c0] Checking 5 pairs on ['15m', '30m', '1h']...
-2026-02-13 03:41:15,710 - INFO - Trend for TRIA/USDT using 1h/30m: NEUTRAL
-2026-02-13 03:41:17,580 - INFO - Trend for INX/USDT using 1h/30m: NEUTRAL
-2026-02-13 03:41:18,497 - INFO - ⏰ Next check for kucoin_Spot_f7ba13c0 in 226.5s
-2026-02-13 03:41:18,497 - INFO - [gateio_Futures_ff3603fa] Checking 2 pairs on ['1h', '4h', '1d']...
-2026-02-13 03:41:19,265 - INFO - Trend for PEPE/USDT:USDT using 1d/4h: NEUTRAL
-2026-02-13 03:41:20,032 - INFO - ⏰ Next check for gateio_Futures_ff3603fa in 1125.0s
-2026-02-13 03:41:20,032 - INFO - ✅ Cycle complete. Waiting 225.0s for next event.
+2026-02-13 04:11:20,625 - INFO - 🐝 Hive Engine Initialized
+2026-02-13 04:11:20,627 - INFO - ➕ Loaded Instance: kucoin_Spot_f7ba13c0 (kucoin)
+2026-02-13 04:11:21,818 - INFO - Initialized kucoin (Spot) DataFetcher with DB candles.db
+2026-02-13 04:11:21,818 - INFO - ➕ Loaded Instance: gateio_Futures_ff3603fa (gateio)
+2026-02-13 04:11:29,627 - INFO - Initialized gateio (Futures) DataFetcher with DB candles.db
+2026-02-13 04:11:29,629 - INFO - 🔄 Processing 2 instances...
+2026-02-13 04:11:29,629 - INFO - [kucoin_Spot_f7ba13c0] Checking 5 pairs on ['15m', '30m', '1h']...
+2026-02-13 04:11:31,377 - INFO - Trend for TRIA/USDT using 1h/30m: NEUTRAL
+2026-02-13 04:11:33,058 - INFO - Trend for INX/USDT using 1h/30m: NEUTRAL
+2026-02-13 04:11:33,886 - INFO - ⏰ Next check for kucoin_Spot_f7ba13c0 in 211.1s
+2026-02-13 04:11:33,886 - INFO - [gateio_Futures_ff3603fa] Checking 2 pairs on ['1h', '4h', '1d']...
+2026-02-13 04:11:34,652 - INFO - Trend for PEPE/USDT:USDT using 1d/4h: NEUTRAL
+2026-02-13 04:11:35,417 - INFO - ⏰ Next check for gateio_Futures_ff3603fa in 2909.6s
+2026-02-13 04:11:35,418 - INFO - ✅ Cycle complete. Waiting 209.6s for next event.
+2026-02-13 04:15:05,002 - INFO - 🔄 Processing 2 instances...
+2026-02-13 04:15:05,002 - INFO - [kucoin_Spot_f7ba13c0] Checking 5 pairs on ['15m', '30m', '1h']...
+2026-02-13 04:15:06,679 - INFO - Trend for TRIA/USDT using 1h/30m: NEUTRAL
+2026-02-13 04:15:08,334 - INFO - Trend for INX/USDT using 1h/30m: NEUTRAL
+2026-02-13 04:15:09,146 - INFO - ⏰ Next check for kucoin_Spot_f7ba13c0 in 895.9s
+2026-02-13 04:15:09,146 - INFO - ✅ Cycle complete. Waiting 895.9s for next event.
+2026-02-13 04:30:05,002 - INFO - 🔄 Processing 2 instances...
+2026-02-13 04:30:05,002 - INFO - [kucoin_Spot_f7ba13c0] Checking 5 pairs on ['15m', '30m', '1h']...
+2026-02-13 04:30:06,809 - INFO - Trend for TRIA/USDT using 1h/30m: NEUTRAL
+2026-02-13 04:30:08,584 - INFO - Trend for INX/USDT using 1h/30m: NEUTRAL
+2026-02-13 04:30:09,518 - INFO - ⏰ Next check for kucoin_Spot_f7ba13c0 in 895.5s
+2026-02-13 04:30:09,518 - INFO - ✅ Cycle complete. Waiting 895.5s for next event.
