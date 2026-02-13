@@ -7,8 +7,18 @@ import concurrent.futures
 import uuid
 import json
 
+import sys
+import os
+
+# Add monitoring_bot to path for Strategy imports
+sys.path.append(os.path.join(os.getcwd(), 'monitoring_bot'))
+from strategy import Strategy
+
 # Page Config
 st.set_page_config(page_title="Crypto-Trader", layout="wide", page_icon="🦂", initial_sidebar_state="expanded")
+
+# Initialize Strategy Engine for UI use
+strategy_engine = Strategy()
 
 # Custom CSS for Dark Mode & Modern Look
 st.markdown("""
@@ -30,11 +40,10 @@ st.markdown("""
         color: #C9D1D9 !important;
     }
     
-    /* Exchange Buttons - Modern Tab Style */
+    /* Buttons */
     div.stButton > button {
         width: 100%;
         border-radius: 8px;
-        height: 3.5em;
         font-weight: 600;
         background-color: #21262D;
         color: #C9D1D9;
@@ -53,7 +62,7 @@ st.markdown("""
         border-color: #8B5CF6 !important;
     }
 
-    /* Start Trading Button (Custom Class for Emphasis) */
+    /* Start Trading Button */
     .start-trading-btn > button {
         background-color: #8B5CF6 !important;
         color: white !important;
@@ -62,14 +71,6 @@ st.markdown("""
         font-size: 1.2em !important;
     }
     
-    /* Strategy Panel Box */
-    .strategy-box {
-        background-color: #21262D;
-        padding: 20px;
-        border-radius: 12px;
-        border: 1px solid #30363D;
-    }
-
     /* Headers */
     h1, h2, h3, h4 {
         font-family: 'Inter', sans-serif;
@@ -85,6 +86,20 @@ st.markdown("""
         border: 1px solid #30363D;
         box-shadow: 0 2px 4px rgba(0,0,0,0.2);
     }
+
+    /* Trend Badge Styling */
+    .trend-badge {
+        padding: 2px 10px;
+        border-radius: 4px;
+        font-weight: bold;
+        font-size: 0.85em;
+        text-transform: uppercase;
+        display: inline-block;
+        margin: 2px;
+    }
+    .trend-up { background-color: #052e16; color: #4ade80; border: 1px solid #14532d; }
+    .trend-down { background-color: #450a0a; color: #f87171; border: 1px solid #7f1d1d; }
+    .trend-neutral { background-color: #1e1b4b; color: #818cf8; border: 1px solid #312e81; }
     
     /* Table Styling */
     div[data-testid="stDataFrame"] {
@@ -453,6 +468,9 @@ elif st.session_state.page == "Live Monitor":
     st.title("🔴 Live Monitor")
     
     conn = get_connection()
+    # Also connect to candles for trend data
+    c_conn = sqlite3.connect("candles.db")
+    
     if conn:
         try:
             # Fetch Instances (exclude DELETED)
@@ -462,35 +480,86 @@ elif st.session_state.page == "Live Monitor":
                 st.subheader("Running Instances")
                 
                 for _, row in df_instances.iterrows():
-                    with st.expander(f"{row['name']} ({row['status']}) - {len(json.loads(row['pairs']))} Pairs"):
-                        st.write(f"**Exchange:** {row['exchange']} | **Type:** {row['market_type']}")
-                        st.write(f"**Created:** {row['created_at']}")
+                    with st.expander(f"🐝 {row['name']} ({row['status']})", expanded=True):
+                        # --- ROW 1: Symmetrical Metrics ---
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric("Exchange", row['exchange'].capitalize())
+                        m2.metric("Market Type", row['market_type'])
                         
-                        col_a, col_b, col_c = st.columns(3)
-                        with col_a:
+                        # Data placeholders (Fetch from ROI/State tables when logic implemented)
+                        try:
+                            state_df = pd.read_sql("SELECT current_level FROM instance_state WHERE id = ?", conn, params=(row['id'],))
+                            current_level = state_df['current_level'].iloc[0] if not state_df.empty else "N/A"
+                        except: current_level = "N/A"
+                        
+                        try:
+                            trades_df = pd.read_sql("SELECT COUNT(*) as count, SUM(pnl) as total_pnl FROM trades WHERE instance_id = ?", conn, params=(row['id'],))
+                            trades_count = trades_df['count'].iloc[0]
+                            total_pnl = trades_df['total_pnl'].iloc[0] or 0.0
+                            # ROI Calc: Simple placeholder (assuming start capital is first level or 1000)
+                            roi = round((total_pnl / 1000) * 100, 2)
+                        except: 
+                            trades_count = 0
+                            roi = 0.0
+
+                        m3.metric("Current Level", current_level)
+                        m4.metric("Trades / ROI", f"{trades_count} / {roi}%")
+                        
+                        # --- ROW 2: Pairs & Trends ---
+                        st.markdown("#### 📊 Pairs Activity & Trends")
+                        pairs = json.loads(row['pairs'])
+                        config = json.loads(row['strategy_config'])
+                        # If timeframes key is nested under strategy or top-level
+                        tfs = config.get('timeframes', config.get('strategy', {}).get('timeframes', []))
+                        
+                        for p in pairs:
+                            # 1.5 for symbol, remaining for TFs
+                            p_cols = st.columns([1.5] + [1] * len(tfs))
+                            p_cols[0].markdown(f"**{p}**")
+                            
+                            for i, tf in enumerate(tfs):
+                                # Fetch recent candles to calc trend
+                                candle_query = "SELECT * FROM candles WHERE instance_id=? AND symbol=? AND timeframe=? ORDER BY timestamp DESC LIMIT 250"
+                                c_df = pd.read_sql(candle_query, c_conn, params=(row['id'], p, tf))
+                                
+                                trend_html = '<span class="trend-badge trend-neutral">SYNCING</span>'
+                                if not c_df.empty:
+                                    try:
+                                        # Calculate indicators on current window
+                                        df_ind = strategy_engine.calculate_indicators(c_df.sort_values('timestamp'))
+                                        trend = strategy_engine.get_row_trend(df_ind.iloc[-1])
+                                        if trend == 'UP': trend_html = f'<span class="trend-badge trend-up">▲ {tf} UP</span>'
+                                        elif trend == 'DOWN': trend_html = f'<span class="trend-badge trend-down">▼ {tf} DOWN</span>'
+                                        else: trend_html = f'<span class="trend-badge trend-neutral">● {tf} NEUTRAL</span>'
+                                    except: pass
+                                p_cols[i+1].markdown(trend_html, unsafe_allow_html=True)
+                        
+                        # --- ROW 3: Symmetrical Buttons ---
+                        st.markdown("---")
+                        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
+                        with col_btn1:
                             if row['status'] == 'ACTIVE':
                                 if st.button("Stop Instance", key=f"stop_{row['id']}"):
                                     conn.execute("UPDATE instances SET status='STOPPED' WHERE id=?", (row['id'],))
                                     conn.commit()
                                     st.rerun()
-                        with col_b:
-                            if row['status'] == 'STOPPED':
+                            elif row['status'] == 'STOPPED':
                                 if st.button("Restart Instance", key=f"start_{row['id']}"):
                                     conn.execute("UPDATE instances SET status='ACTIVE' WHERE id=?", (row['id'],))
                                     conn.commit()
                                     st.rerun()
-                        with col_c:
+                        with col_btn3:
                             if st.button("Delete Instance", key=f"delete_{row['id']}", type="secondary"):
-                                # Set to DELETED
                                 conn.execute("UPDATE instances SET status='DELETED' WHERE id=?", (row['id'],))
                                 conn.commit()
-                                st.warning(f"Instance {row['id']} marked for deletion. Hive Engine will clean up data.")
+                                st.warning(f"Instance {row['id']} marked for deletion.")
                                 st.rerun()
             else:
                 st.info("No active instances. Go to Strategy Builder to launch one.")
         except Exception as e:
             st.error(f"Error loading instances: {e}")
         conn.close()
+        c_conn.close()
 
 elif st.session_state.page == "Post-Trade Review":
     st.title("📝 Review")

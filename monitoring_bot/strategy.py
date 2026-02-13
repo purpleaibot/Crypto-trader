@@ -64,6 +64,10 @@ class Strategy:
         """
         adx_threshold = 20
         
+        # Check if indicators exist (UI safety check)
+        if 'EMA_50' not in row or 'EMA_200' not in row or 'ADX_14' not in row:
+            return 'NEUTRAL'
+            
         # Uptrend Condition
         if (row['close'] > row['EMA_50'] > row['EMA_200'] and
             row['ADX_14'] > adx_threshold and
@@ -77,6 +81,10 @@ class Strategy:
             return 'DOWN'
             
         return 'NEUTRAL'
+
+    def get_row_trend(self, row):
+        """Public wrapper for UI trend display"""
+        return self._evaluate_trend(row)
 
     def check_trigger(self, df_1h, trend_direction):
         """
