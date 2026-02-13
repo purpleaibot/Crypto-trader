@@ -108,6 +108,15 @@ st.markdown("""
         background-color: #0D1117;
     }
     
+    /* Strategy Definition Box */
+    .strat-box {
+        background-color: #161B22;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #30363D;
+        margin-bottom: 10px;
+    }
+
     /* Hide Streamlit Branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
@@ -131,27 +140,29 @@ def register_instance(config, pairs_list):
         conn = get_connection()
         if not conn: return False
         
-        # Ensure table exists (also in main.py but good to have here)
+        # Ensure table exists
         conn.execute('''CREATE TABLE IF NOT EXISTS instances (
             id TEXT PRIMARY KEY, name TEXT, exchange TEXT, base_currency TEXT, 
             market_type TEXT, strategy_config TEXT, pairs TEXT, 
-            status TEXT DEFAULT 'STOPPED', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            status TEXT DEFAULT 'STOPPED', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            strategy_json TEXT
         )''')
         
         instance_id = str(uuid.uuid4())[:8]
         name = f"{config['exchange']}_{config['market_type']}_{instance_id}"
         
         conn.execute(
-            "INSERT INTO instances (id, name, exchange, base_currency, market_type, strategy_config, pairs, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO instances (id, name, exchange, base_currency, market_type, strategy_config, pairs, status, strategy_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 instance_id,
                 name,
                 config['exchange'],
                 config['base_currency'],
                 config['market_type'],
-                json.dumps(config['strategy']),
+                json.dumps(config['strategy_params']),
                 json.dumps(pairs_list),
-                'ACTIVE'
+                'ACTIVE',
+                json.dumps(config['strategy_logic'])
             )
         )
         conn.commit()
@@ -377,6 +388,52 @@ elif st.session_state.page == "Strategy Builder":
         else:
             st.info("No pairs selected.")
 
+        # --- STRATEGY SETUP SECTION ---
+        st.markdown("---")
+        st.subheader("🛠️ Strategy Setup (Logic Builder)")
+        
+        AVAILABLE_INDICATORS = ["EMA", "SMA", "RSI", "MACD", "ADX", "ATR", "Bollinger Bands", "Ichimoku", "VWAP"]
+        OPERATORS = [">", "<", "crosses above", "crosses below", "equals", "is true"]
+        
+        def render_logic_row(tf_label, key_prefix):
+            with st.container(border=True):
+                st.markdown(f"**{tf_label}**")
+                if f"{key_prefix}_rows" not in st.session_state:
+                    st.session_state[f"{key_prefix}_rows"] = 1
+                
+                rows_data = []
+                for i in range(st.session_state[f"{key_prefix}_rows"]):
+                    c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1.5])
+                    with c1: ind_a = st.selectbox(f"Indicator A", AVAILABLE_INDICATORS, key=f"{key_prefix}_a_{i}")
+                    with c2: p_a = st.text_input(f"Param", value="10", key=f"{key_prefix}_pa_{i}")
+                    with c3: op = st.selectbox(f"Operator", OPERATORS, key=f"{key_prefix}_op_{i}")
+                    with c4: 
+                        target_type = st.radio("Target", ["Value", "Indicator"], key=f"{key_prefix}_type_{i}", horizontal=True)
+                        if target_type == "Value":
+                            val = st.text_input(f"Value", value="0", key=f"{key_prefix}_val_{i}")
+                            rows_data.append({"a": ind_a, "pa": p_a, "op": op, "target": "value", "val": val})
+                        else:
+                            ind_b = st.selectbox(f"Indicator B", AVAILABLE_INDICATORS, key=f"{key_prefix}_b_{i}")
+                            p_b = st.text_input(f"Param B", value="20", key=f"{key_prefix}_pb_{i}")
+                            rows_data.append({"a": ind_a, "pa": p_a, "op": op, "target": "indicator", "b": ind_b, "pb": p_b})
+                
+                if st.button(f"➕ Add Rule to {tf_label}", key=f"add_{key_prefix}"):
+                    st.session_state[f"{key_prefix}_rows"] += 1
+                    st.rerun()
+                return rows_data
+
+        small_logic = render_logic_row("Small Timeframe Strategy (Trigger)", "small")
+        med_logic = render_logic_row("Medium Timeframe Strategy (Trend)", "med")
+        large_logic = render_logic_row("Large Timeframe Strategy (Trend)", "large")
+
+        if st.button("💾 Apply Strategy Setup to Instance", use_container_width=True):
+            st.session_state.current_strategy_logic = {
+                "small": small_logic,
+                "med": med_logic,
+                "large": large_logic
+            }
+            st.success("Strategy Logic Applied! It will be used for the next instance launch.")
+
     # --- RIGHT PANEL: Strategy Settings ---
     with col_right:
         st.markdown("### ⚙️ Strategy Settings")
@@ -436,11 +493,12 @@ elif st.session_state.page == "Strategy Builder":
                     st.error("Please add pairs to your watchlist first!")
                 else:
                     # 2. Build Config
+                    logic = st.session_state.get('current_strategy_logic', {"small": [], "med": [], "large": []})
                     config = {
                         "exchange": strat_exchange,
                         "base_currency": base_currency,
                         "market_type": market_type,
-                        "strategy": {
+                        "strategy_params": {
                             "user_account": user_account,
                             "start_amount": start_amount,
                             "liquidity": liquidity,
@@ -448,7 +506,8 @@ elif st.session_state.page == "Strategy Builder":
                             "safe_levels": [sl1, sl2],
                             "risk": {"max_trades": max_open_trades, "rr": f"{risk_val}:{reward_val}", "pct": risk_per_trade},
                             "timeframes": [tf_small, tf_medium, tf_large]
-                        }
+                        },
+                        "strategy_logic": logic
                     }
                     
                     pairs_list = st.session_state.watchlist['Symbol'].tolist()
