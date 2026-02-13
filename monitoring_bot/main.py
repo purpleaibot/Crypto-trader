@@ -5,6 +5,7 @@ import sqlite3
 import pandas as pd
 import ccxt
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from data_fetcher import DataFetcher
 from strategy import Strategy
@@ -29,7 +30,7 @@ class HiveEngine:
         """Load ACTIVE instances from DB and handle DELETED ones"""
         try:
             conn = sqlite3.connect(DB_PATH)
-            # Ensure table exists with instance_id column
+            # Ensure table exists
             conn.execute('''CREATE TABLE IF NOT EXISTS instances (
                 id TEXT PRIMARY KEY, name TEXT, exchange TEXT, base_currency TEXT, 
                 market_type TEXT, strategy_config TEXT, pairs TEXT, 
@@ -91,7 +92,8 @@ class HiveEngine:
                 if iid not in current_ids:
                     logger.info(f"➖ Unloaded Instance: {self.active_instances[iid]['name']}")
                     del self.active_instances[iid]
-                    # Ideally stop the subprocesses too here
+                    if iid in self.next_wake_times:
+                        del self.next_wake_times[iid]
                     
         except Exception as e:
             logger.error(f"Error loading instances: {e}")
@@ -104,14 +106,10 @@ class HiveEngine:
             return time.time() + 10 # Default wait if no instances
 
         min_wait = float('inf')
-        for iid, instance in self.active_instances.items():
+        for iid in list(self.active_instances.keys()):
             if iid not in self.next_wake_times:
-                # First time, calculate for all its timeframes
-                instance_min_wait = float('inf')
-                for tf in instance['timeframes']:
-                    wait = self.get_time_to_next_candle(tf)
-                    instance_min_wait = min(instance_min_wait, wait)
-                self.next_wake_times[iid] = time.time() + instance_min_wait
+                # First time, force immediate run
+                return time.time()
             
             min_wait = min(min_wait, self.next_wake_times[iid])
         
@@ -129,30 +127,29 @@ class HiveEngine:
         logger.info(f"🔄 Processing {len(self.active_instances)} instances...")
         
         # Process instances that are due (or force first run)
+        current_time = time.time()
         for iid, instance in list(self.active_instances.items()):
             needs_processing = False
-            current_instance_min_sleep = float('inf')
 
-            # Force processing if never run before
-            if iid not in self.next_wake_times:
+            # Force processing if never run before or due
+            if iid not in self.next_wake_times or self.next_wake_times[iid] <= current_time:
                 needs_processing = True
-            else:
-                if self.next_wake_times[iid] <= time.time():
-                    needs_processing = True
 
             if needs_processing:
                 try:
                     self.process_instance(instance)
                     
                     # Recalculate next wake time after processing
+                    # Use the shortest timeframe for the next check
                     instance_min_wait = float('inf')
                     for tf in instance['timeframes']:
-                        wait = self.get_time_to_next_candle(tf)
-                        instance_min_wait = min(instance_min_wait, wait)
+                        wait_seconds = self.get_time_to_next_candle(tf)
+                        instance_min_wait = min(instance_min_wait, wait_seconds)
                     
                     self.next_wake_times[iid] = time.time() + instance_min_wait
+                    logger.info(f"⏰ Next check for {instance['name']} in {instance_min_wait:.1f}s")
                 except Exception as e:
-                    logger.error(f"Error processing {instance['name']}: {e}")
+                    logger.error(f"Error processing {instance['name']}: {e}", exc_info=True)
 
         # Final check: sleep until the earliest next event
         current_time = time.time()
@@ -183,11 +180,12 @@ class HiveEngine:
             # Fetch data for ALL required timeframes for this pair
             data_map = {}
             for tf in timeframes:
-                # Map timeframe string to exchange-specific format
-                exchange_tf = fetcher.exchange.timeframes.get(tf, tf)
+                # Standardize timeframe to short codes (e.g. '1h')
+                # CCXT KuCoin fetch_ohlcv expects the key (like '1h'), not the internal '1hour'
+                normalized_tf = self.normalize_timeframe(tf)
                 
                 # Fetch 500 candles with instance isolation
-                df = fetcher.fetch_and_sync(instance_id, symbol, exchange_tf, limit=500)
+                df = fetcher.fetch_and_sync(instance_id, symbol, normalized_tf, limit=500)
                 if df is not None and not df.empty:
                     data_map[tf] = df
                 else:
@@ -200,7 +198,8 @@ class HiveEngine:
                 valid_set = True
                 for tf in data_map:
                     df_tf = data_map[tf]
-                    if df_tf is None or len(df_tf) < 50:
+                    # Strategy needs enough data for indicators (EMA 200 needs 200+)
+                    if df_tf is None or len(df_tf) < 20: # Loose check for RSI/EMA10
                         valid_set = False
                         break
                     processed_data[tf] = self.strategy.calculate_indicators(df_tf)
@@ -208,20 +207,18 @@ class HiveEngine:
                 if not valid_set:
                     continue
 
-                # Trend Logic: Requires at least 2 timeframes (e.g. 1d and 4h)
+                # Trend Logic: Requires at least 2 timeframes
                 trend = "NEUTRAL"
                 if len(timeframes) >= 3:
-                    # Multi-TF Trend check using TF2 and TF1 from sorted list
                     try:
+                        # Logic assumes timeframes are sorted smallest to largest
+                        # e.g. ["1h", "4h", "1d"] -> med is "4h", large is "1d"
                         df_large = processed_data[timeframes[2]]
                         df_med = processed_data[timeframes[1]]
                         
-                        # Check if we have enough data for indicators (EMA 200 needs 200 candles)
-                        if len(df_large) > 200 and len(df_med) > 200:
+                        if len(df_large) >= 200 and len(df_med) >= 200:
                             trend = self.strategy.check_trend(df_large, df_med)
                             logger.info(f"Trend for {symbol} using {timeframes[2]}/{timeframes[1]}: {trend}")
-                        else:
-                            logger.warning(f"Insufficient data for trend indicators on {symbol} (Large: {len(df_large)}, Med: {len(df_med)})")
                     except Exception as e:
                         logger.error(f"Trend check failed for {symbol}: {e}")
                 
@@ -235,55 +232,53 @@ class HiveEngine:
                 except Exception as e:
                     logger.error(f"Trigger check failed for {symbol}: {e}")
 
+    def normalize_timeframe(self, timeframe):
+        """Standardize timeframe string to short codes (e.g. 1h, 15m) for CCXT consistency"""
+        tf_str = str(timeframe).lower()
+        if 'min' in tf_str: return tf_str.replace('min', 'm')
+        if 'hour' in tf_str: return tf_str.replace('hour', 'h')
+        if 'day' in tf_str: return tf_str.replace('day', 'd')
+        if 'week' in tf_str: return tf_str.replace('week', 'w')
+        if 'month' in tf_str: return tf_str.replace('month', 'M')
+        return tf_str
+
     def get_time_to_next_candle(self, timeframe):
         """
         Calculate seconds until the next candle closes for a given timeframe.
+        Supports short codes (1h, 15m) and long codes (1hour, 15min).
         """
         now = datetime.now(timezone.utc)
-        tf_str = str(timeframe).lower()
+        norm = self.normalize_timeframe(timeframe)
         
         try:
-            # Map long forms to single characters for extraction
-            # KuCoin uses '1min', '1hour', '1day', '1week'
-            norm = tf_str.replace('min', 'm').replace('hour', 'h').replace('day', 'd').replace('week', 'w')
+            # Extract numerical value
+            val_match = re.search(r"(\d+)", norm)
+            val = int(val_match.group(1)) if val_match else 1
             
-            # Extract number
-            num_part = "".join(filter(str.isdigit, norm))
-            val = int(num_part) if num_part else 1
-            
-            # Extract unit characters
-            unit_part = "".join(filter(lambda x: not x.isdigit(), norm))
-            unit = 'm' if 'm' in unit_part else ('h' if 'h' in unit_part else ('d' if 'd' in unit_part else 'w' if 'w' in unit_part else 'h'))
-
-            if unit == 'm':
-                delta = timedelta(minutes=val)
+            if 'm' in norm:
                 next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=val - (now.minute % val))
-            elif unit == 'h':
-                delta = timedelta(hours=val)
+            elif 'h' in norm:
                 next_boundary = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=val - (now.hour % val))
-            elif unit == 'd':
-                delta = timedelta(days=val)
+            elif 'd' in norm:
                 next_boundary = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=val)
-            elif unit == 'w':
-                delta = timedelta(weeks=val)
-                # Align to start of week (Monday 00:00)
+            elif 'w' in norm:
+                # Start of week
                 days_to_monday = now.weekday()
                 next_boundary = (now - timedelta(days=days_to_monday)).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(weeks=val)
             else:
-                return 60
-        except Exception:
-            return 60
+                return 60 # Default
 
-        wait = (next_boundary - now).total_seconds()
-        # Ensure positive wait and add 5s buffer
-        return max(0, wait) + 5
+            wait = (next_boundary - now).total_seconds()
+            return max(0, wait) + 5 # Add 5s buffer
+        except Exception as e:
+            logger.error(f"Error calculating next candle for {timeframe}: {e}")
+            return 60
 
     def cleanup_instance_data(self, instance_id):
         """Clean up candles associated ONLY with this specific instance_id"""
         CANDLES_DB = "candles.db"
         try:
             conn = sqlite3.connect(CANDLES_DB)
-            # Delete candles for this specific instance_id
             conn.execute("DELETE FROM candles WHERE instance_id=?", (instance_id,))
             conn.commit()
             conn.close()
