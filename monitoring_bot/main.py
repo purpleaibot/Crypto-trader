@@ -30,11 +30,12 @@ class HiveEngine:
         """Load ACTIVE instances from DB and handle DELETED ones"""
         try:
             conn = sqlite3.connect(DB_PATH)
-            # Ensure table exists
+            # Ensure table exists (schema update handled in previous steps)
             conn.execute('''CREATE TABLE IF NOT EXISTS instances (
                 id TEXT PRIMARY KEY, name TEXT, exchange TEXT, base_currency TEXT, 
                 market_type TEXT, strategy_config TEXT, pairs TEXT, 
-                status TEXT DEFAULT 'STOPPED', created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                status TEXT DEFAULT 'STOPPED', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                strategy_json TEXT
             )''')
             
             # 1. Handle DELETED instances first
@@ -69,6 +70,9 @@ class HiveEngine:
                     logger.info(f"➕ Loaded Instance: {row['name']} ({row['exchange']})")
                     
                     config = json.loads(row['strategy_config']) if row['strategy_config'] else {}
+                    # Load Dynamic Strategy Logic if available
+                    strategy_logic = json.loads(row['strategy_json']) if 'strategy_json' in row and row['strategy_json'] else None
+                    
                     instance_data = {
                         "id": row['id'],
                         "name": row['name'],
@@ -76,7 +80,8 @@ class HiveEngine:
                         "market_type": row['market_type'],
                         "pairs": json.loads(row['pairs']) if row['pairs'] else [],
                         "config": config,
-                        "timeframes": config.get('timeframes', ['1h'])
+                        "timeframes": config.get('timeframes', ['1h']),
+                        "strategy_logic": strategy_logic
                     }
                     self.active_instances[instance_id] = instance_data
                     
@@ -171,6 +176,7 @@ class HiveEngine:
         pairs = instance['pairs']
         timeframes = instance['timeframes']
         instance_id = instance['id']
+        strategy_logic = instance.get('strategy_logic')
         
         logger.info(f"[{instance['name']}] Checking {len(pairs)} pairs on {timeframes}...")
         
@@ -207,30 +213,39 @@ class HiveEngine:
                 if not valid_set:
                     continue
 
-                # Trend Logic: Requires at least 2 timeframes
-                trend = "NEUTRAL"
-                if len(timeframes) >= 3:
-                    try:
-                        # Logic assumes timeframes are sorted smallest to largest
-                        # e.g. ["1h", "4h", "1d"] -> med is "4h", large is "1d"
-                        df_large = processed_data[timeframes[2]]
-                        df_med = processed_data[timeframes[1]]
-                        
-                        if len(df_large) >= 200 and len(df_med) >= 200:
-                            trend = self.strategy.check_trend(df_large, df_med)
-                            logger.info(f"Trend for {symbol} using {timeframes[2]}/{timeframes[1]}: {trend}")
-                    except Exception as e:
-                        logger.error(f"Trend check failed for {symbol}: {e}")
-                
-                # Trigger Logic: Primary timeframe (usually smallest)
-                primary_tf = timeframes[0]
-                try:
-                    signal = self.strategy.check_trigger(processed_data[primary_tf], trend)
+                # --- DYNAMIC STRATEGY ENGINE ---
+                if strategy_logic:
+                    # Use the new dynamic engine
+                    signal = self.strategy.check_dynamic_signal(processed_data, strategy_logic, timeframes)
                     if signal:
-                        logger.info(f"🚀 SIGNAL [{instance['name']}]: {signal} on {symbol} ({primary_tf})")
+                        logger.info(f"🚀 DYNAMIC SIGNAL [{instance['name']}]: {signal} on {symbol}")
                         # TODO: Send to Analyze Agent
-                except Exception as e:
-                    logger.error(f"Trigger check failed for {symbol}: {e}")
+                else:
+                    # --- FALLBACK TO HARDCODED LOGIC ---
+                    # Trend Logic: Requires at least 2 timeframes
+                    trend = "NEUTRAL"
+                    if len(timeframes) >= 3:
+                        try:
+                            # Logic assumes timeframes are sorted smallest to largest
+                            # e.g. ["1h", "4h", "1d"] -> med is "4h", large is "1d"
+                            df_large = processed_data[timeframes[2]]
+                            df_med = processed_data[timeframes[1]]
+                            
+                            if len(df_large) >= 200 and len(df_med) >= 200:
+                                trend = self.strategy.check_trend(df_large, df_med)
+                                logger.info(f"Trend for {symbol} using {timeframes[2]}/{timeframes[1]}: {trend}")
+                        except Exception as e:
+                            logger.error(f"Trend check failed for {symbol}: {e}")
+                    
+                    # Trigger Logic: Primary timeframe (usually smallest)
+                    primary_tf = timeframes[0]
+                    try:
+                        signal = self.strategy.check_trigger(processed_data[primary_tf], trend)
+                        if signal:
+                            logger.info(f"🚀 SIGNAL [{instance['name']}]: {signal} on {symbol} ({primary_tf})")
+                            # TODO: Send to Analyze Agent
+                    except Exception as e:
+                        logger.error(f"Trigger check failed for {symbol}: {e}")
 
     def normalize_timeframe(self, timeframe):
         """Standardize timeframe string to short codes (e.g. 1h, 15m) for CCXT consistency"""
